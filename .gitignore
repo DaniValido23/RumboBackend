@@ -1,0 +1,6 @@
+# Ignore the .env file
+.env
+
+# Other common ignores
+*.log
+*.tmp

@@ -1,19 +1,35 @@
 package main
 
 import (
-    "log"
-    "net/http"
+	"encoding/json"
+	"log"
+	"net/http"
+	"os"
 
-    "github.com/gorilla/mux"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 )
 
+var locationData struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
 func main() {
+    // Load environment variables from .env file
+    if err := godotenv.Load(); err != nil {
+        log.Fatalf("Error loading .env file: %v", err)
+    }
+
+    setupMQTT()
+
+    // Configuración del servidor HTTP
     r := mux.NewRouter()
     
     // Rutas
     r.HandleFunc("/", HomeHandler).Methods("GET")
-    r.HandleFunc("/api/items", GetItemsHandler).Methods("GET")
-    r.HandleFunc("/api/items", CreateItemHandler).Methods("POST")
+    r.HandleFunc("/api/location", GetLocationHandler).Methods("GET")
 
     // Middleware
     r.Use(loggingMiddleware)
@@ -23,19 +39,52 @@ func main() {
     log.Fatal(http.ListenAndServe(":8080", r))
 }
 
+func setupMQTT() {
+    // Configuración MQTT
+    opts := mqtt.NewClientOptions()
+    opts.AddBroker(os.Getenv("MQTT_BROKER"))
+    opts.SetClientID("go_mqtt_client")
+    opts.SetUsername(os.Getenv("MQTT_USERNAME"))
+    opts.SetPassword(os.Getenv("MQTT_PASSWORD"))
+
+    // Callback para manejar los mensajes
+    opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+        log.Printf("Received message from topic: %s\n", msg.Topic())
+        var payload struct {
+            LocationSolved struct {
+                Location struct {
+                    Latitude  float64 `json:"latitude"`
+                    Longitude float64 `json:"longitude"`
+                } `json:"location"`
+            } `json:"location_solved"`
+        }
+        if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
+            log.Printf("Error unmarshalling payload: %v", err)
+            return
+        }
+        locationData.Latitude = payload.LocationSolved.Location.Latitude
+        locationData.Longitude = payload.LocationSolved.Location.Longitude
+    })
+
+    // Crear y conectar el cliente MQTT
+    client := mqtt.NewClient(opts)
+    if token := client.Connect(); token.Wait() && token.Error() != nil {
+        log.Fatalf("Error connecting to MQTT broker: %v", token.Error())
+    }
+
+    // Suscribirse al tópico
+    if token := client.Subscribe(os.Getenv("MQTT_TOPIC"), 0, nil); token.Wait() && token.Error() != nil {
+        log.Fatalf("Error subscribing to topic: %v", token.Error())
+    }
+}
+
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
     w.Write([]byte("¡Bienvenido a la API!"))
 }
 
-func GetItemsHandler(w http.ResponseWriter, r *http.Request) {
+func GetLocationHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
-    w.Write([]byte(`{"items": []}`))
-}
-
-func CreateItemHandler(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(http.StatusCreated)
-    w.Write([]byte(`{"message": "Item creado correctamente"}`))
+    json.NewEncoder(w).Encode(locationData)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {

@@ -34,9 +34,15 @@ func main() {
     // Middleware
     r.Use(loggingMiddleware)
 
+    // Obtener el puerto del entorno
+    port := os.Getenv("PORT")
+    if port == "" {
+        port = "8080" // Default port if not specified
+    }
+
     // Iniciar servidor
-    log.Println("Servidor iniciado en http://localhost:8080")
-    log.Fatal(http.ListenAndServe(":8080", r))
+    log.Printf("Servidor iniciado en http://localhost:%s", port)
+    log.Fatal(http.ListenAndServe(":"+port, r))
 }
 
 func setupMQTT() {

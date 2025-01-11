@@ -2,8 +2,6 @@
 
 This is a simple backend in Go using the `gorilla/mux` package for routing. It is part of the RumboApp, which is still under construction. 🛠️
 
-
-
 ## Usage ▶️
 
 To start the server, run:
@@ -22,6 +20,7 @@ The server will start at `http://localhost:8080`.
 
 This project connects to the Tower1 device using the MQTT protocol to retrieve its location data. The location data is then served through the `/api/location` endpoint.
 
+Make sure to update the MQTT configuration directly in the `main.go` file.
 
 ## License 📜
 

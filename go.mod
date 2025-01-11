@@ -5,7 +5,6 @@ go 1.21
 require (
 	github.com/eclipse/paho.mqtt.golang v1.3.5
 	github.com/gorilla/mux v1.8.1
-	github.com/joho/godotenv v1.5.1
 )
 
 require (

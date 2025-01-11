@@ -8,7 +8,6 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
 )
 
 var locationData struct {
@@ -17,10 +16,10 @@ var locationData struct {
 }
 
 func main() {
-    // Load environment variables from .env file
-    if err := godotenv.Load(); err != nil {
-        log.Fatalf("Error loading .env file: %v", err)
-    }
+    // Remove loading environment variables from .env file
+    // if err := godotenv.Load(); err != nil {
+    //     log.Fatalf("Error loading .env file: %v", err)
+    // }
 
     setupMQTT()
 
@@ -48,10 +47,10 @@ func main() {
 func setupMQTT() {
     // Configuración MQTT
     opts := mqtt.NewClientOptions()
-    opts.AddBroker(os.Getenv("MQTT_BROKER"))
+    opts.AddBroker("tcp://eu1.cloud.thethings.industries:1883")
     opts.SetClientID("go_mqtt_client")
-    opts.SetUsername(os.Getenv("MQTT_USERNAME"))
-    opts.SetPassword(os.Getenv("MQTT_PASSWORD"))
+    opts.SetUsername("gps-3a@parallel")
+    opts.SetPassword("NNSXS.UYPEF3S77QZ7WFOPUTE3QWTFNBDIS7LPTRLJLPA.ZYIZOEME4WTRWUI6KV6VCFJIHBXO5TYXD6JFZS2V4GCCU27FQOQQ")
 
     // Callback para manejar los mensajes
     opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
@@ -79,7 +78,7 @@ func setupMQTT() {
     }
 
     // Suscribirse al tópico
-    if token := client.Subscribe(os.Getenv("MQTT_TOPIC"), 0, nil); token.Wait() && token.Error() != nil {
+    if token := client.Subscribe("v3/gps-3a@parallel/devices/eui-70b3d57ed80025b4/location/solved", 0, nil); token.Wait() && token.Error() != nil {
         log.Fatalf("Error subscribing to topic: %v", token.Error())
     }
 }

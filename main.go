@@ -5,14 +5,30 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 var locationData struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
+}
+
+var testLocation = struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}{
+	Latitude:  45.492074,
+	Longitude: -73.613610,
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
 }
 
 func main() {
@@ -29,6 +45,9 @@ func main() {
     // Rutas
     r.HandleFunc("/", HomeHandler).Methods("GET")
     r.HandleFunc("/api/location", GetLocationHandler).Methods("GET")
+    r.HandleFunc("/api/update-test-location", UpdateTestLocationHandler).Methods("POST")
+    r.HandleFunc("/ws/location", LocationWebSocketHandler)
+    r.HandleFunc("/ws/test-location", TestLocationWebSocketHandler)
 
     // Middleware
     r.Use(loggingMiddleware)
@@ -90,6 +109,59 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 func GetLocationHandler(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(locationData)
+}
+
+func UpdateTestLocationHandler(w http.ResponseWriter, r *http.Request) {
+	var newLocation struct {
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&newLocation); err != nil {
+		http.Error(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+	testLocation.Latitude = newLocation.Latitude
+	testLocation.Longitude = newLocation.Longitude
+	w.WriteHeader(http.StatusOK)
+}
+
+func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading to websocket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		location := locationData
+		if err := conn.WriteJSON(location); err != nil {
+			log.Printf("Error writing JSON to websocket: %v", err)
+			return
+		}
+	}
+}
+
+func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading to websocket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := conn.WriteJSON(testLocation); err != nil {
+			log.Printf("Error writing JSON to websocket: %v", err)
+			return
+		}
+	}
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {

@@ -262,7 +262,7 @@ func determineStreetDirection(lat, lng float64) (float64, float64, error) {
 }
 
 func generateStreetPoints(lat, lng float64) []Point {
-    offset := 0.00045
+    offset := 0.0009  // approximately 100 meters
     
     dirLat, dirLng, err := determineStreetDirection(lat, lng)
     if err != nil {
@@ -433,7 +433,7 @@ func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
     var lastResponse LocationResponse
     firstRun := true
 
-    ticker := time.NewTicker(20 * time.Second)
+    ticker := time.NewTicker(1 * time.Minute)
     defer ticker.Stop()
 
     for range ticker.C {
@@ -489,7 +489,7 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
     var lastResponse LocationResponse
     firstRun := true
 
-    ticker := time.NewTicker(20 * time.Second)
+    ticker := time.NewTicker(1 * time.Minute)
     defer ticker.Stop()
 
     for range ticker.C {

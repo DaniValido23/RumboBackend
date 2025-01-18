@@ -433,7 +433,7 @@ func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
     var lastResponse LocationResponse
     firstRun := true
 
-    ticker := time.NewTicker(1 * time.Minute)
+    ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
 
     for range ticker.C {
@@ -489,7 +489,7 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
     var lastResponse LocationResponse
     firstRun := true
 
-    ticker := time.NewTicker(1 * time.Minute)
+    ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
 
     for range ticker.C {

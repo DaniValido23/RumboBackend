@@ -198,6 +198,30 @@ func pointInPolygon(lat, lng float64, poly []StreetPoint) bool {
 	return inside
 }
 
+func findNearestStreet(lat, lng float64) StreetInfo {
+	var nearest StreetInfo
+	minDistance := math.MaxFloat64
+	origin := Point{Lat: lat, Lng: lng}
+
+	for _, s := range allStreets {
+		for _, pt := range s.Points {
+			d := calculateDistance(origin, Point{Lat: pt.Lat, Lng: pt.Lng})
+			if d < minDistance {
+				minDistance = d
+				var polylines []Point
+				for _, p := range s.Polylines {
+					polylines = append(polylines, Point{Lat: p.Lat, Lng: p.Lng})
+				}
+				nearest = StreetInfo{
+					StreetName: s.StreetName,
+					Polylines:  polylines,
+				}
+			}
+		}
+	}
+	return nearest
+}
+
 func findStreet(lat, lng float64) StreetInfo {
 	for _, s := range allStreets {
 		if pointInPolygon(lat, lng, s.Points) {
@@ -211,7 +235,7 @@ func findStreet(lat, lng float64) StreetInfo {
 			}
 		}
 	}
-	return StreetInfo{}
+	return findNearestStreet(lat, lng)
 }
 
 func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {

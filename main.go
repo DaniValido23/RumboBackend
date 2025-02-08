@@ -2,13 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
 	"os"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,15 +34,14 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-// New structures for location and street information
 type Point struct {
 	Lat float64 `json:"lat"`
 	Lng float64 `json:"lng"`
 }
 
 type StreetInfo struct {
-	PlaceID string  `json:"placeId"`
-	Points  []Point `json:"points"`
+	StreetName string  `json:"streetName"`
+	Polylines  []Point `json:"polylines"`
 }
 
 type LocationResponse struct {
@@ -55,7 +52,24 @@ type LocationResponse struct {
 	StreetInfo StreetInfo `json:"street_info"`
 }
 
+var allStreets []StreetData
 
+type StreetPoint struct {
+	ID  int     `json:"id"`
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"long"`
+}
+
+type StreetData struct {
+	ID              int           `json:"id"`
+	StreetName      string        `json:"street_name"`
+	ParkingCapacity int           `json:"parking_capacity"`
+	Points          []StreetPoint `json:"points"`
+	Polylines       []struct {
+		Lat float64 `json:"lat"`
+		Lng float64 `json:"long"`
+	} `json:"polylines"`
+}
 
 func main() {
 
@@ -124,413 +138,182 @@ func GetLocationHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(locationData)
 }
 
+func parseCoordinate(coord string) (float64, error) {
+	coord = strings.ReplaceAll(coord, ",", ".")
+	return strconv.ParseFloat(coord, 64)
+}
+
 func UpdateTestLocationHandler(w http.ResponseWriter, r *http.Request) {
-	var newLocation struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
+	var input struct {
+		Latitude  string `json:"latitude"`
+		Longitude string `json:"longitude"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&newLocation); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
-	testLocation.Latitude = newLocation.Latitude
-	testLocation.Longitude = newLocation.Longitude
+	lat, err := parseCoordinate(input.Latitude)
+	if err != nil {
+		http.Error(w, "Invalid latitude", http.StatusBadRequest)
+		return
+	}
+	lng, err := parseCoordinate(input.Longitude)
+	if err != nil {
+		http.Error(w, "Invalid longitude", http.StatusBadRequest)
+		return
+	}
+
+	testLocation.Latitude = lat
+	testLocation.Longitude = lng
 	w.WriteHeader(http.StatusOK)
 }
 
-type GoogleRoadsResponse struct {
-	SnappedPoints []struct {
-		Location struct {
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-		} `json:"location"`
-		PlaceID string `json:"placeId"`
-	} `json:"snappedPoints"`
+func init() {
+	loadStreetData()
 }
 
-func hasEnoughPoints(streetInfo StreetInfo) bool {
-    return len(streetInfo.Points) > 1
-}
-
-func calculateDistance(p1, p2 Point) float64 {
-    const R = 6371000
-    
-    lat1 := p1.Lat * math.Pi / 180
-    lat2 := p2.Lat * math.Pi / 180
-    deltaLat := (p2.Lat - p1.Lat) * math.Pi / 180
-    deltaLng := (p2.Lng - p1.Lng) * math.Pi / 180
-
-    a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-         math.Cos(lat1)*math.Cos(lat2)*
-         math.Sin(deltaLng/2)*math.Sin(deltaLng/2)
-    
-    c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-    return R * c
-}
-
-func interpolatePoint(p1, p2 Point, fraction float64) Point {
-    return Point{
-        Lat: p1.Lat + (p2.Lat-p1.Lat)*fraction,
-        Lng: p1.Lng + (p2.Lng-p1.Lng)*fraction,
-    }
-}
-
-func generateEquidistantPoints(points []Point, targetCount int) []Point {
-    if len(points) < 2 {
-        return points
-    }
-
-    var totalDistance float64
-    for i := 0; i < len(points)-1; i++ {
-        totalDistance += calculateDistance(points[i], points[i+1])
-    }
-
-    spacing := totalDistance / float64(targetCount-1)
-    result := make([]Point, 0, targetCount)
-    result = append(result, points[0])
-
-    currentDistance := 0.0
-    segmentIndex := 0
-
-    for i := 1; i < targetCount-1; i++ {
-        targetDistance := spacing * float64(i)
-
-        for currentDistance+calculateDistance(points[segmentIndex], points[segmentIndex+1]) < targetDistance {
-            currentDistance += calculateDistance(points[segmentIndex], points[segmentIndex+1])
-            segmentIndex++
-        }
-
-        remainingDistance := targetDistance - currentDistance
-        segmentLength := calculateDistance(points[segmentIndex], points[segmentIndex+1])
-        fraction := remainingDistance / segmentLength
-
-        interpolated := interpolatePoint(points[segmentIndex], points[segmentIndex+1], fraction)
-        result = append(result, interpolated)
-    }
-
-    result = append(result, points[len(points)-1])
-    return result
-}
-
-func determineStreetDirection(lat, lng float64) (float64, float64, error) {
-    initialOffset := 0.0001
-    initialPoints := []Point{
-        {Lat: lat, Lng: lng},
-        {Lat: lat + initialOffset/2, Lng: lng},
-        {Lat: lat + initialOffset, Lng: lng},
-        {Lat: lat - initialOffset/2, Lng: lng},
-        {Lat: lat - initialOffset, Lng: lng},
-        {Lat: lat, Lng: lng + initialOffset/2},
-        {Lat: lat, Lng: lng + initialOffset},
-        {Lat: lat, Lng: lng - initialOffset/2},
-        {Lat: lat, Lng: lng - initialOffset},
-    }
-
-    pointsStr := formatPointsForAPI(initialPoints)
-    url := fmt.Sprintf(
-        "https://roads.googleapis.com/v1/snapToRoads?path=%s&interpolate=true&key=%s",
-        pointsStr, "AIzaSyA_igs8K_3i9fWu6htBgHQsHN_LxaZKMvk",
-    )
-
-    resp, err := http.Get(url)
-    if err != nil {
-        return 0, 0, err
-    }
-    defer resp.Body.Close()
-
-    var roadResp GoogleRoadsResponse
-    if err := json.NewDecoder(resp.Body).Decode(&roadResp); err != nil {
-        return 0, 0, err
-    }
-
-    if len(roadResp.SnappedPoints) < 2 {
-        return 0, 0, fmt.Errorf("insufficient points to determine direction")
-    }
-
-    p1 := roadResp.SnappedPoints[0].Location
-    p2 := roadResp.SnappedPoints[len(roadResp.SnappedPoints)-1].Location
-    
-    dirLat := p2.Latitude - p1.Latitude
-    dirLng := p2.Longitude - p1.Longitude
-    
-    magnitude := math.Sqrt(dirLat*dirLat + dirLng*dirLng)
-    if magnitude == 0 {
-        return 0, 0, fmt.Errorf("could not determine direction")
-    }
-    
-    return dirLat/magnitude, dirLng/magnitude, nil
-}
-
-func generateStreetPoints(lat, lng float64) []Point {
-    offset := 0.0009  // approximately 100 meters
-    
-    dirLat, dirLng, err := determineStreetDirection(lat, lng)
-    if err != nil {
-        smallOffset := offset / 5
-        return []Point{
-            {Lat: lat - offset, Lng: lng},
-            {Lat: lat - smallOffset*4, Lng: lng},
-            {Lat: lat - smallOffset*3, Lng: lng},
-            {Lat: lat - smallOffset*2, Lng: lng},
-            {Lat: lat - smallOffset, Lng: lng},
-            {Lat: lat, Lng: lng},
-            {Lat: lat + smallOffset, Lng: lng},
-            {Lat: lat + smallOffset*2, Lng: lng},
-            {Lat: lat + smallOffset*3, Lng: lng},
-            {Lat: lat + smallOffset*4, Lng: lng},
-            {Lat: lat + offset, Lng: lng},
-        }
-    }
-
-    points := make([]Point, 0, 21)
-    
-    points = append(points, Point{Lat: lat, Lng: lng})
-    
-    for i := 1; i <= 10; i++ {
-        fraction := float64(i) * 0.1
-        points = append(points, Point{
-            Lat: lat + dirLat*offset*fraction,
-            Lng: lng + dirLng*offset*fraction,
-        })
-    }
-    
-    for i := 1; i <= 10; i++ {
-        fraction := float64(i) * 0.1
-        points = append(points, Point{
-            Lat: lat - dirLat*offset*fraction,
-            Lng: lng - dirLng*offset*fraction,
-        })
-    }
-    
-    return points
-}
-
-func formatPointsForAPI(points []Point) string {
-	var parts []string
-	for _, p := range points {
-		parts = append(parts, fmt.Sprintf("%f,%f", p.Lat, p.Lng))
+func loadStreetData() {
+	file, err := os.Open("street_info.json")
+	if err != nil {
+		log.Printf("Error opening street_info.json: %v", err)
+		return
 	}
-	return strings.Join(parts, "|")
+	defer file.Close()
+
+	if err := json.NewDecoder(file).Decode(&allStreets); err != nil {
+		log.Printf("Error decoding street_info.json: %v", err)
+	}
 }
 
-func getStreetInfo(lat, lng float64) (StreetInfo, error) {
-    apiKey := "AIzaSyA_igs8K_3i9fWu6htBgHQsHN_LxaZKMvk"
-    if apiKey == "" {
-        return StreetInfo{}, fmt.Errorf("google maps api key not found")
-    }
-
-    var streetInfo StreetInfo
-    maxRetries := 3
-    retryCount := 0
-
-    for retryCount < maxRetries {
-        points := generateStreetPoints(lat, lng)
-        pointsStr := formatPointsForAPI(points)
-
-        url := fmt.Sprintf(
-            "https://roads.googleapis.com/v1/snapToRoads?path=%s&interpolate=true&key=%s",
-            pointsStr, apiKey,
-        )
-
-        resp, err := http.Get(url)
-        if err != nil {
-            log.Printf("Error making request: %v", err)
-            return StreetInfo{}, err
-        }
-
-        body, err := io.ReadAll(resp.Body)
-        resp.Body.Close()
-        if err != nil {
-            log.Printf("Error reading response body: %v", err)
-            return StreetInfo{}, err
-        }
-
-        var roadResp GoogleRoadsResponse
-        if err := json.Unmarshal(body, &roadResp); err != nil {
-            log.Printf("Error unmarshalling response: %v", err)
-            return StreetInfo{}, err
-        }
-
-        log.Printf("Number of snapped points received: %d", len(roadResp.SnappedPoints))
-
-        points = make([]Point, 0)
-        placeID := "-"
-
-        if len(roadResp.SnappedPoints) > 0 {
-            placeID = roadResp.SnappedPoints[0].PlaceID
-            for _, sp := range roadResp.SnappedPoints {
-                points = append(points, Point{
-                    Lat: sp.Location.Latitude,
-                    Lng: sp.Location.Longitude,
-                })
-            }
-        }
-
-        if len(points) > 1 {
-            center := Point{Lat: lat, Lng: lng}
-            sortedPoints := sortPointsByDirection(points, center)
-            
-            if len(sortedPoints) > 4 {
-                points = []Point{
-                    sortedPoints[0],
-                    sortedPoints[len(sortedPoints)/2],
-                    sortedPoints[len(sortedPoints)-1],
-                }
-            }
-            
-            points = generateEquidistantPoints(points, 10)
-        }
-
-        streetInfo = StreetInfo{
-            PlaceID: placeID,
-            Points:  points,
-        }
-
-        if hasEnoughPoints(streetInfo) {
-            log.Printf("Got sufficient points (%d) on attempt %d", len(points), retryCount+1)
-            return streetInfo, nil
-        }
-
-        log.Printf("Insufficient points (%d) on attempt %d", len(points), retryCount+1)
-        retryCount++
-        time.Sleep(time.Second)
-    }
-
-    return streetInfo, nil
+func pointInPolygon(lat, lng float64, poly []StreetPoint) bool {
+	num := len(poly)
+	inside := false
+	for i := 0; i < num; i++ {
+		j := (i + num - 1) % num
+		if ((poly[i].Lat > lat) != (poly[j].Lat > lat)) &&
+			(lng < (poly[j].Lng-poly[i].Lng)*(lat-poly[i].Lat)/(poly[j].Lat-poly[i].Lat)+poly[i].Lng) {
+			inside = !inside
+		}
+	}
+	return inside
 }
 
-func sortPointsByDirection(points []Point, center Point) []Point {
-    dirLat, dirLng, err := determineStreetDirection(center.Lat, center.Lng)
-    if err != nil {
-        return points
-    }
-
-    sorted := make([]Point, len(points))
-    copy(sorted, points)
-    
-    sort.Slice(sorted, func(i, j int) bool {
-        pi := sorted[i]
-        pj := sorted[j]
-        
-        proji := (pi.Lat-center.Lat)*dirLat + (pi.Lng-center.Lng)*dirLng
-        projj := (pj.Lat-center.Lat)*dirLat + (pj.Lng-center.Lng)*dirLng
-        
-        return proji < projj
-    })
-    
-    return sorted
+func findStreet(lat, lng float64) StreetInfo {
+	for _, s := range allStreets {
+		if pointInPolygon(lat, lng, s.Points) {
+			var resultPolylines []Point
+			for _, p := range s.Polylines {
+				resultPolylines = append(resultPolylines, Point{Lat: p.Lat, Lng: p.Lng})
+			}
+			return StreetInfo{
+				StreetName: s.StreetName,
+				Polylines:  resultPolylines,
+			}
+		}
+	}
+	return StreetInfo{}
 }
 
 func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        log.Printf("Error upgrading to websocket: %v", err)
-        return
-    }
-    defer conn.Close()
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading to websocket: %v", err)
+		return
+	}
+	defer conn.Close()
 
-    var lastLocation Point
-    var lastResponse LocationResponse
-    firstRun := true
+	var lastLocation Point
+	var lastResponse LocationResponse
+	firstRun := true
 
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
-    for range ticker.C {
-        currentPoint := Point{Lat: locationData.Latitude, Lng: locationData.Longitude}
+	for range ticker.C {
+		currentPoint := Point{Lat: locationData.Latitude, Lng: locationData.Longitude}
 
-        if !firstRun && currentPoint == lastLocation {
-            log.Printf("Using cached response for location: {lat: %f, lng: %f}", 
-                currentPoint.Lat, currentPoint.Lng)
-            if err := conn.WriteJSON(lastResponse); err != nil {
-                log.Printf("Error writing cached JSON to websocket: %v", err)
-                return
-            }
-            continue
-        }
+		if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
+			log.Printf("Location within 50cm margin, using cached response")
+			if err := conn.WriteJSON(lastResponse); err != nil {
+				log.Printf("Error writing cached JSON to websocket: %v", err)
+				return
+			}
+			continue
+		}
 
-        streetInfo, err := getStreetInfo(locationData.Latitude, locationData.Longitude)
-        if err != nil {
-            log.Printf("Error getting street info: %v", err)
-            continue
-        }
+		streetInfo := findStreet(locationData.Latitude, locationData.Longitude)
 
-        response := LocationResponse{
-            Location: struct {
-                Latitude  float64 `json:"latitude"`
-                Longitude float64 `json:"longitude"`
-            }{
-                Latitude:  locationData.Latitude,
-                Longitude: locationData.Longitude,
-            },
-            StreetInfo: streetInfo,
-        }
+		response := LocationResponse{
+			Location: struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			}{
+				Latitude:  locationData.Latitude,
+				Longitude: locationData.Longitude,
+			},
+			StreetInfo: streetInfo,
+		}
 
-        lastLocation = currentPoint
-        lastResponse = response
-        firstRun = false
+		lastLocation = currentPoint
+		lastResponse = response
+		firstRun = false
 
-        if err := conn.WriteJSON(response); err != nil {
-            log.Printf("Error writing JSON to websocket: %v", err)
-            return
-        }
-    }
+		if err := conn.WriteJSON(response); err != nil {
+			log.Printf("Error writing JSON to websocket: %v", err)
+			return
+		}
+	}
 }
 
 func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        log.Printf("Error upgrading to websocket: %v", err)
-        return
-    }
-    defer conn.Close()
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading to websocket: %v", err)
+		return
+	}
+	defer conn.Close()
 
-    var lastLocation Point
-    var lastResponse LocationResponse
-    firstRun := true
+	var lastLocation Point
+	var lastResponse LocationResponse
+	firstRun := true
 
-    ticker := time.NewTicker(30 * time.Second)
-    defer ticker.Stop()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
-    for range ticker.C {
-        currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
+	for range ticker.C {
+		currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
 
-        if !firstRun && currentPoint == lastLocation {
-            log.Printf("Using cached response for test location: {lat: %f, lng: %f}", 
-                currentPoint.Lat, currentPoint.Lng)
-            if err := conn.WriteJSON(lastResponse); err != nil {
-                log.Printf("Error writing cached JSON to websocket: %v", err)
-                return
-            }
-            continue
-        }
+		if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
+			log.Printf("Test location within 50cm margin, using cached response")
+			if err := conn.WriteJSON(lastResponse); err != nil {
+				log.Printf("Error writing cached JSON to websocket: %v", err)
+				return
+			}
+			continue
+		}
 
-        streetInfo, err := getStreetInfo(testLocation.Latitude, testLocation.Longitude)
-        if err != nil {
-            log.Printf("Error getting street info: %v", err)
-            continue
-        }
+		streetInfo := findStreet(testLocation.Latitude, testLocation.Longitude)
 
-        response := LocationResponse{
-            Location: struct {
-                Latitude  float64 `json:"latitude"`
-                Longitude float64 `json:"longitude"`
-            }{
-                Latitude:  testLocation.Latitude,
-                Longitude: testLocation.Longitude,
-            },
-            StreetInfo: streetInfo,
-        }
+		response := LocationResponse{
+			Location: struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			}{
+				Latitude:  testLocation.Latitude,
+				Longitude: testLocation.Longitude,
+			},
+			StreetInfo: streetInfo,
+		}
 
-        lastLocation = currentPoint
-        lastResponse = response
-        firstRun = false
+		lastLocation = currentPoint
+		lastResponse = response
+		firstRun = false
 
-        if err := conn.WriteJSON(response); err != nil {
-            log.Printf("Error writing JSON to websocket: %v", err)
-            return
-        }
-    }
+		if err := conn.WriteJSON(response); err != nil {
+			log.Printf("Error writing JSON to websocket: %v", err)
+			return
+		}
+	}
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -538,4 +321,26 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		log.Printf("%s %s", r.Method, r.RequestURI)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Helper function to check if two points are within 50cm of each other
+func arePointsWithinMargin(p1, p2 Point) bool {
+	distance := calculateDistance(p1, p2)
+	return distance <= 0.5
+}
+
+func calculateDistance(p1, p2 Point) float64 {
+	const R = 6371000
+
+	lat1 := p1.Lat * math.Pi / 180
+	lat2 := p2.Lat * math.Pi / 180
+	deltaLat := (p2.Lat - p1.Lat) * math.Pi / 180
+	deltaLng := (p2.Lng - p1.Lng) * math.Pi / 180
+
+	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
+		math.Cos(lat1)*math.Cos(lat2)*
+			math.Sin(deltaLng/2)*math.Sin(deltaLng/2)
+
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return R * c
 }

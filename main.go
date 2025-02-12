@@ -118,6 +118,7 @@ func setupMQTT() {
 		}
 		locationData.Latitude = payload.LocationSolved.Location.Latitude
 		locationData.Longitude = payload.LocationSolved.Location.Longitude
+		log.Printf("New location received - Latitude: %f, Longitude: %f", locationData.Latitude, locationData.Longitude)
 	})
 
 	client := mqtt.NewClient(opts)
@@ -284,6 +285,7 @@ func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		} else {
+			log.Printf("New location update - Latitude: %f, Longitude: %f", currentPoint.Lat, currentPoint.Lng)
 			streetInfo := findStreet(locationData.Latitude, locationData.Longitude)
 			response := LocationResponse{
 				Location: struct {
@@ -358,6 +360,7 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		} else {
+			log.Printf("New test location update - Latitude: %f, Longitude: %f", currentPoint.Lat, currentPoint.Lng)
 			streetInfo := findStreet(testLocation.Latitude, testLocation.Longitude)
 			response := LocationResponse{
 				Location: struct {

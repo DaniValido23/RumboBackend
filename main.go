@@ -20,12 +20,9 @@ var locationData struct {
 	Longitude float64 `json:"longitude"`
 }
 
-var testLocation = struct {
+var testLocation struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
-}{
-	Latitude:  45.492074,
-	Longitude: -73.613610,
 }
 
 var testInProgress bool

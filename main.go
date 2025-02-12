@@ -324,6 +324,11 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 
 	for range ticker.C {
+		if !testInProgress {
+			log.Printf("Test run completed. Stopping WebSocket updates.")
+			break
+		}
+
 		currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
 
 		if currentPoint.Lat == 0 && currentPoint.Lng == 0 {
@@ -400,7 +405,6 @@ func RunTestLocationsHandler(w http.ResponseWriter, r *http.Request) {
 			{ Lat: 45.5846233, Lng: -73.5323988 },
 			{ Lat: 45.5848715, Lng: -73.5322361 },
 			{ Lat: 45.5850948, Lng: -73.5320983 },
-			{ Lat: 0.0, Lng: 0.0 },
 		}
 		for _, p := range points {
 			testLocation.Latitude = p.Lat

@@ -331,7 +331,7 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 
 		currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
 
-		if currentPoint.Lat == 0 && currentPoint.Lng == 0 {
+		if currentPoint.Lat == 0.0 && currentPoint.Lng == 0.0 {
 			response := LocationResponse{
 				Location: struct {
 					Latitude  float64 `json:"latitude"`
@@ -405,6 +405,7 @@ func RunTestLocationsHandler(w http.ResponseWriter, r *http.Request) {
 			{ Lat: 45.5846233, Lng: -73.5323988 },
 			{ Lat: 45.5848715, Lng: -73.5322361 },
 			{ Lat: 45.5850948, Lng: -73.5320983 },
+			{ Lat: 0.0, Lng: 0.0 },
 		}
 		for _, p := range points {
 			testLocation.Latitude = p.Lat

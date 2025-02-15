@@ -26,6 +26,19 @@ var testLocation struct {
 }
 
 var testInProgress bool
+var simulateCarsActive bool
+
+var simulatedCarPoints = []Point{
+	{Lat: 45.5834670, Lng: -73.5332410},
+	{Lat: 45.5837599, Lng: -73.5330502},
+	{Lat: 45.5840234, Lng: -73.5331265},
+	{Lat: 45.5843470, Lng: -73.5338906},
+	{Lat: 45.5847384, Lng: -73.5350873},
+	{Lat: 45.5842382, Lng: -73.5326139},
+	{Lat: 45.5857096, Lng: -73.5359618},
+	{Lat: 45.5855454, Lng: -73.5354624},
+	{Lat: 45.5852768, Lng: -73.5346336},
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -48,8 +61,9 @@ type LocationResponse struct {
 		Latitude  float64 `json:"latitude"`
 		Longitude float64 `json:"longitude"`
 	} `json:"location"`
-	StreetInfo StreetInfo `json:"street_info"`
-	Message    string     `json:"message,omitempty"`
+	StreetInfo         StreetInfo `json:"street_info"`
+	Message            string     `json:"message,omitempty"`
+	PercentageOccupied int        `json:"percentage_occupied"`
 }
 
 var allStreets []StreetData
@@ -83,6 +97,7 @@ func main() {
 	r.HandleFunc("/ws/location", LocationWebSocketHandler)
 	r.HandleFunc("/ws/test-location", TestLocationWebSocketHandler)
 	r.HandleFunc("/api/run-test-locations", RunTestLocationsHandler).Methods("GET")
+	r.HandleFunc("/api/simulate-cars", SimulateCarsHandler).Methods("GET")
 
 	r.Use(loggingMiddleware)
 
@@ -256,57 +271,80 @@ func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		currentPoint := Point{Lat: locationData.Latitude, Lng: locationData.Longitude}
-
-		if currentPoint.Lat == 0.0 && currentPoint.Lng == 0.0 {
-			response := LocationResponse{
-				Location: struct {
-					Latitude  float64 `json:"latitude"`
-					Longitude float64 `json:"longitude"`
-				}{
-					Latitude:  0.0,
-					Longitude: 0.0,
-				},
-				StreetInfo: StreetInfo{
-					StreetName: "",
-					Polylines:  []Point{},
-				},
-				Message: "without signal",
-			}
-			if err := conn.WriteJSON(response); err != nil {
-				log.Printf("Error writing JSON to websocket: %v", err)
-				return
-			}
-			continue
+		var activePoints []Point
+		if locationData.Latitude != 0.0 || locationData.Longitude != 0.0 {
+			activePoints = append(activePoints, Point{Lat: locationData.Latitude, Lng: locationData.Longitude})
+		}
+		if simulateCarsActive {
+			activePoints = append(activePoints, simulatedCarPoints...)
 		}
 
-		if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
-			lastResponse.Message = "Using cached location"
-			if err := conn.WriteJSON(lastResponse); err != nil {
-				log.Printf("Error writing cached JSON to websocket: %v", err)
-				return
-			}
-			continue
-		} else {
-			log.Printf("New location update - Latitude: %f, Longitude: %f", currentPoint.Lat, currentPoint.Lng)
-			streetInfo := findStreet(locationData.Latitude, locationData.Longitude)
-			response := LocationResponse{
-				Location: struct {
-					Latitude  float64 `json:"latitude"`
-					Longitude float64 `json:"longitude"`
-				}{
-					Latitude:  locationData.Latitude,
-					Longitude: locationData.Longitude,
-				},
-				StreetInfo: streetInfo,
-				Message:    "New location detected",
-			}
-			lastLocation = currentPoint
-			lastResponse = response
-			firstRun = false
+		occupancy := make(map[int]int)
+		for _, p := range activePoints {
+			s := findStreet(p.Lat, p.Lng)
+			sID := findStreetID(s.StreetName)
+			occupancy[sID]++
+		}
 
-			if err := conn.WriteJSON(response); err != nil {
-				log.Printf("Error writing JSON to websocket: %v", err)
+		var responses []LocationResponse
+		for _, p := range activePoints {
+			if p.Lat == 0.0 && p.Lng == 0.0 {
+				response := LocationResponse{
+					Location: struct {
+						Latitude  float64 `json:"latitude"`
+						Longitude float64 `json:"longitude"`
+					}{
+						Latitude:  0.0,
+						Longitude: 0.0,
+					},
+					StreetInfo: StreetInfo{
+						StreetName: "",
+						Polylines:  []Point{},
+					},
+					Message: "without signal",
+				}
+				responses = append(responses, response)
+				continue
+			}
+
+			if !firstRun && arePointsWithinMargin(p, lastLocation) {
+				lastResponse.Message = "Using cached location"
+				responses = append(responses, lastResponse)
+				continue
+			} else {
+				log.Printf("New location update - Latitude: %f, Longitude: %f", p.Lat, p.Lng)
+				streetInfo := findStreet(p.Lat, p.Lng)
+				sID := findStreetID(streetInfo.StreetName)
+				capacity := getStreetCapacity(streetInfo.StreetName)
+				occupied := occupancy[sID]
+				percentage := 0
+				if capacity > 0 {
+					percentage = (occupied * 100) / capacity
+				}
+
+				response := LocationResponse{
+					Location: struct {
+						Latitude  float64 `json:"latitude"`
+						Longitude float64 `json:"longitude"`
+					}{
+						Latitude:  p.Lat,
+						Longitude: p.Lng,
+					},
+					StreetInfo:         streetInfo,
+					Message:            "New location detected",
+					PercentageOccupied: percentage,
+				}
+				lastLocation = p
+				lastResponse = response
+				firstRun = false
+
+				responses = append(responses, response)
+			}
+		}
+
+		if len(responses) > 0 {
+			if err := conn.WriteJSON(responses); err != nil {
+				log.Printf("Error writing JSON array to websocket: %v", err)
 				return
 			}
 		}
@@ -400,23 +438,23 @@ func RunTestLocationsHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		points := []Point{
-			{ Lat: 45.5834154, Lng: -73.5331976 },
-			{ Lat: 45.5836587, Lng: -73.5330197 },
-			{ Lat: 45.5839076, Lng: -73.5328529 },
-			{ Lat: 45.5841270, Lng: -73.5334444 },
-			{ Lat: 45.5844604, Lng: -73.5344887 },
-			{ Lat: 45.5847659, Lng: -73.5353965 },
-			{ Lat: 45.5850823, Lng: -73.5363582 },
-			{ Lat: 45.5858864, Lng: -73.5362865 },
-			{ Lat: 45.5855239, Lng: -73.5351299 },
-			{ Lat: 45.5850867, Lng: -73.5338104 },
-			{ Lat: 45.5847081, Lng: -73.5326593 },
-			{ Lat: 45.5846233, Lng: -73.5323988 },
-			{ Lat: 45.5848715, Lng: -73.5322361 },
-			{ Lat: 45.5850948, Lng: -73.5320983 },
-			{ Lat: 0.0, Lng: 0.0 },
-			{ Lat: 0.0, Lng: 0.0 },
-			{ Lat: 0.0, Lng: 0.0 },
+			{Lat: 45.5834154, Lng: -73.5331976},
+			{Lat: 45.5836587, Lng: -73.5330197},
+			{Lat: 45.5839076, Lng: -73.5328529},
+			{Lat: 45.5841270, Lng: -73.5334444},
+			{Lat: 45.5844604, Lng: -73.5344887},
+			{Lat: 45.5847659, Lng: -73.5353965},
+			{Lat: 45.5850823, Lng: -73.5363582},
+			{Lat: 45.5858864, Lng: -73.5362865},
+			{Lat: 45.5855239, Lng: -73.5351299},
+			{Lat: 45.5850867, Lng: -73.5338104},
+			{Lat: 45.5847081, Lng: -73.5326593},
+			{Lat: 45.5846233, Lng: -73.5323988},
+			{Lat: 45.5848715, Lng: -73.5322361},
+			{Lat: 45.5850948, Lng: -73.5320983},
+			{Lat: 0.0, Lng: 0.0},
+			{Lat: 0.0, Lng: 0.0},
+			{Lat: 0.0, Lng: 0.0},
 		}
 		for _, p := range points {
 			testLocation.Latitude = p.Lat
@@ -427,6 +465,16 @@ func RunTestLocationsHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	w.Write([]byte("Test started"))
+}
+
+func SimulateCarsHandler(w http.ResponseWriter, r *http.Request) {
+	if simulateCarsActive {
+		simulateCarsActive = false
+		w.Write([]byte("Simulation stopped"))
+	} else {
+		simulateCarsActive = true
+		w.Write([]byte("Simulation started"))
+	}
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -456,4 +504,22 @@ func calculateDistance(p1, p2 Point) float64 {
 
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 	return R * c
+}
+
+func findStreetID(streetName string) int {
+	for i, s := range allStreets {
+		if s.StreetName == streetName {
+			return i
+		}
+	}
+	return -1
+}
+
+func getStreetCapacity(streetName string) int {
+	for _, s := range allStreets {
+		if s.StreetName == streetName {
+			return s.ParkingCapacity
+		}
+	}
+	return 0
 }

@@ -372,47 +372,75 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		var activePoints []Point
+		if testLocation.Latitude != 0.0 || testLocation.Longitude != 0.0 {
+			activePoints = append(activePoints, Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude})
+		}
+		if simulateCarsActive {
+			activePoints = append(activePoints, simulatedCarPoints...)
+		}
+
+		occupancy := make(map[int]int)
+		for _, p := range activePoints {
+			s := findStreet(p.Lat, p.Lng)
+			sID := findStreetID(s.StreetName)
+			occupancy[sID]++
+		}
+
 		var responses []LocationResponse
-		currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
-
-		if currentPoint.Lat == 0.0 && currentPoint.Lng == 0.0 {
-			response := LocationResponse{
-				Location: struct {
-					Latitude  float64 `json:"latitude"`
-					Longitude float64 `json:"longitude"`
-				}{
-					Latitude:  0.0,
-					Longitude: 0.0,
-				},
-				StreetInfo: StreetInfo{
-					StreetName: "",
-					Polylines:  []Point{},
-				},
-				Message: "without signal",
+		for _, p := range activePoints {
+			if p.Lat == 0.0 && p.Lng == 0.0 {
+				response := LocationResponse{
+					Location: struct {
+						Latitude  float64 `json:"latitude"`
+						Longitude float64 `json:"longitude"`
+					}{
+						Latitude:  0.0,
+						Longitude: 0.0,
+					},
+					StreetInfo: StreetInfo{
+						StreetName: "",
+						Polylines:  []Point{},
+					},
+					Message: "without signal",
+				}
+				responses = append(responses, response)
+				continue
 			}
-			responses = append(responses, response)
-		} else if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
-			lastResponse.Message = "Using cached location"
-			responses = append(responses, lastResponse)
-		} else {
-			log.Printf("New test location update - Latitude: %f, Longitude: %f", currentPoint.Lat, currentPoint.Lng)
-			streetInfo := findStreet(testLocation.Latitude, testLocation.Longitude)
-			response := LocationResponse{
-				Location: struct {
-					Latitude  float64 `json:"latitude"`
-					Longitude float64 `json:"longitude"`
-				}{
-					Latitude:  testLocation.Latitude,
-					Longitude: testLocation.Longitude,
-				},
-				StreetInfo: streetInfo,
-				Message:    "New location detected",
-			}
-			lastLocation = currentPoint
-			lastResponse = response
-			firstRun = false
 
-			responses = append(responses, response)
+			if !firstRun && arePointsWithinMargin(p, lastLocation) {
+				lastResponse.Message = "Using cached location"
+				responses = append(responses, lastResponse)
+				continue
+			} else {
+				log.Printf("New test location update - Latitude: %f, Longitude: %f", p.Lat, p.Lng)
+				streetInfo := findStreet(p.Lat, p.Lng)
+				sID := findStreetID(streetInfo.StreetName)
+				capacity := getStreetCapacity(streetInfo.StreetName)
+				occupied := occupancy[sID]
+				percentage := 0
+				if capacity > 0 {
+					percentage = (occupied * 100) / capacity
+				}
+
+				response := LocationResponse{
+					Location: struct {
+						Latitude  float64 `json:"latitude"`
+						Longitude float64 `json:"longitude"`
+					}{
+						Latitude:  p.Lat,
+						Longitude: p.Lng,
+					},
+					StreetInfo:         streetInfo,
+					Message:            "New location detected",
+					PercentageOccupied: percentage,
+				}
+				lastLocation = p
+				lastResponse = response
+				firstRun = false
+
+				responses = append(responses, response)
+			}
 		}
 
 		if len(responses) > 0 {

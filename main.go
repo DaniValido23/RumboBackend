@@ -372,6 +372,7 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
+		var responses []LocationResponse
 		currentPoint := Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude}
 
 		if currentPoint.Lat == 0.0 && currentPoint.Lng == 0.0 {
@@ -389,20 +390,10 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 				},
 				Message: "without signal",
 			}
-			if err := conn.WriteJSON(response); err != nil {
-				log.Printf("Error writing JSON to websocket: %v", err)
-				return
-			}
-			continue
-		}
-
-		if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
+			responses = append(responses, response)
+		} else if !firstRun && arePointsWithinMargin(currentPoint, lastLocation) {
 			lastResponse.Message = "Using cached location"
-			if err := conn.WriteJSON(lastResponse); err != nil {
-				log.Printf("Error writing cached JSON to websocket: %v", err)
-				return
-			}
-			continue
+			responses = append(responses, lastResponse)
 		} else {
 			log.Printf("New test location update - Latitude: %f, Longitude: %f", currentPoint.Lat, currentPoint.Lng)
 			streetInfo := findStreet(testLocation.Latitude, testLocation.Longitude)
@@ -421,7 +412,11 @@ func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
 			lastResponse = response
 			firstRun = false
 
-			if err := conn.WriteJSON(response); err != nil {
+			responses = append(responses, response)
+		}
+
+		if len(responses) > 0 {
+			if err := conn.WriteJSON(responses); err != nil {
 				log.Printf("Error writing JSON to websocket: %v", err)
 				return
 			}

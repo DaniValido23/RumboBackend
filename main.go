@@ -2,43 +2,28 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
-	"math"
+	"net"
 	"net/http"
 	"os"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
 
-var locationData struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-}
+const (
+	writeWait = 10 * time.Second
 
-var testLocation struct {
-	Latitude  float64 `json:"latitude"`
-	Longitude float64 `json:"longitude"`
-}
+	pongWait = 60 * time.Second
 
-var testInProgress bool
-var simulateCarsActive bool
+	pingPeriod = (pongWait * 9) / 10
 
-var simulatedCarPoints = []Point{
-	{Lat: 45.5834670, Lng: -73.5332410},
-	{Lat: 45.5837599, Lng: -73.5330502},
-	{Lat: 45.5840234, Lng: -73.5331265},
-	{Lat: 45.5843470, Lng: -73.5338906},
-	{Lat: 45.5847384, Lng: -73.5350873},
-	{Lat: 45.5842382, Lng: -73.5326139},
-	{Lat: 45.5857096, Lng: -73.5359618},
-	{Lat: 45.5855454, Lng: -73.5354624},
-	{Lat: 45.5852768, Lng: -73.5346336},
-}
+	maxMessageSize = 512
+)
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -46,458 +31,40 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-type Point struct {
-	Lat float64 `json:"lat"`
-	Lng float64 `json:"lng"`
-}
-
-type StreetInfo struct {
-	StreetName string  `json:"streetName"`
-	Polylines  []Point `json:"polylines"`
-}
-
-type LocationResponse struct {
-	Location struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-	} `json:"location"`
-	StreetInfo         StreetInfo `json:"street_info"`
-	Message            string     `json:"message,omitempty"`
-	PercentageOccupied int        `json:"percentage_occupied"`
-}
-
-var allStreets []StreetData
-
-type StreetPoint struct {
-	ID  int     `json:"id"`
-	Lat float64 `json:"lat"`
-	Lng float64 `json:"long"`
-}
-
-type StreetData struct {
-	ID              int           `json:"id"`
-	StreetName      string        `json:"street_name"`
-	ParkingCapacity int           `json:"parking_capacity"`
-	Points          []StreetPoint `json:"points"`
-	Polylines       []struct {
-		Lat float64 `json:"lat"`
-		Lng float64 `json:"long"`
-	} `json:"polylines"`
-}
+var clients = make(map[*websocket.Conn]bool)
+var clientsMutex sync.RWMutex
 
 func main() {
-
+	loadStreetData()
 	setupMQTT()
 
 	r := mux.NewRouter()
 
 	r.HandleFunc("/", HomeHandler).Methods("GET")
-	r.HandleFunc("/api/location", GetLocationHandler).Methods("GET")
-	r.HandleFunc("/api/update-test-location", UpdateTestLocationHandler).Methods("POST")
-	r.HandleFunc("/ws/location", LocationWebSocketHandler)
-	r.HandleFunc("/ws/test-location", TestLocationWebSocketHandler)
-	r.HandleFunc("/api/run-test-locations", RunTestLocationsHandler).Methods("GET")
-	r.HandleFunc("/api/simulate-cars", SimulateCarsHandler).Methods("GET")
-
+	r.HandleFunc("/api/streets", GetAllStreetsHandler).Methods("GET")
+	r.HandleFunc("/ws/all-streets", AllStreetsWebSocketHandler)
+	// Add the new test endpoint route
+	r.HandleFunc("/api/test/simulate-cars", SimulateCarsHandler).Methods("GET")
 	r.Use(loggingMiddleware)
+
+	handler := handlers.CORS(
+		handlers.AllowedOrigins([]string{"*"}),
+		handlers.AllowedMethods([]string{"GET", "POST", "OPTIONS"}),
+	)(r)
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
+	go broadcastOccupancyUpdates()
+
 	log.Printf("Server started at http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
-}
-
-func setupMQTT() {
-	opts := mqtt.NewClientOptions()
-	opts.AddBroker("tcp://eu1.cloud.thethings.industries:1883")
-	opts.SetClientID("go_mqtt_client")
-	opts.SetUsername("gps-3a@parallel")
-	opts.SetPassword("NNSXS.UYPEF3S77QZ7WFOPUTE3QWTFNBDIS7LPTRLJLPA.ZYIZOEME4WTRWUI6KV6VCFJIHBXO5TYXD6JFZS2V4GCCU27FQOQQ")
-
-	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
-		log.Printf("Received message from topic: %s\n", msg.Topic())
-		var payload struct {
-			LocationSolved struct {
-				Location struct {
-					Latitude  float64 `json:"latitude"`
-					Longitude float64 `json:"longitude"`
-				} `json:"location"`
-			} `json:"location_solved"`
-		}
-		if err := json.Unmarshal(msg.Payload(), &payload); err != nil {
-			log.Printf("Error unmarshalling payload: %v", err)
-			return
-		}
-		locationData.Latitude = payload.LocationSolved.Location.Latitude
-		locationData.Longitude = payload.LocationSolved.Location.Longitude
-		log.Printf("New location received - Latitude: %f, Longitude: %f", locationData.Latitude, locationData.Longitude)
-	})
-
-	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Fatalf("Error connecting to MQTT broker: %v", token.Error())
-	}
-
-	if token := client.Subscribe("v3/gps-3a@parallel/devices/eui-70b3d57ed80025b4/location/solved", 0, nil); token.Wait() && token.Error() != nil {
-		log.Fatalf("Error subscribing to topic: %v", token.Error())
-	}
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("¡Bienvenido a la API!"))
-}
-
-func GetLocationHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(locationData)
-}
-
-func parseCoordinate(coord string) (float64, error) {
-	coord = strings.ReplaceAll(coord, ",", ".")
-	return strconv.ParseFloat(coord, 64)
-}
-
-func UpdateTestLocationHandler(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Latitude  string `json:"latitude"`
-		Longitude string `json:"longitude"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, "Invalid request payload", http.StatusBadRequest)
-		return
-	}
-	lat, err := parseCoordinate(input.Latitude)
-	if err != nil {
-		http.Error(w, "Invalid latitude", http.StatusBadRequest)
-		return
-	}
-	lng, err := parseCoordinate(input.Longitude)
-	if err != nil {
-		http.Error(w, "Invalid longitude", http.StatusBadRequest)
-		return
-	}
-
-	testLocation.Latitude = lat
-	testLocation.Longitude = lng
-	w.WriteHeader(http.StatusOK)
-}
-
-func init() {
-	loadStreetData()
-}
-
-func loadStreetData() {
-	file, err := os.Open("street_info.json")
-	if err != nil {
-		log.Printf("Error opening street_info.json: %v", err)
-		return
-	}
-	defer file.Close()
-
-	if err := json.NewDecoder(file).Decode(&allStreets); err != nil {
-		log.Printf("Error decoding street_info.json: %v", err)
-	}
-}
-
-func pointInPolygon(lat, lng float64, poly []StreetPoint) bool {
-	num := len(poly)
-	inside := false
-	for i := 0; i < num; i++ {
-		j := (i + num - 1) % num
-		if ((poly[i].Lat > lat) != (poly[j].Lat > lat)) &&
-			(lng < (poly[j].Lng-poly[i].Lng)*(lat-poly[i].Lat)/(poly[j].Lat-poly[i].Lat)+poly[i].Lng) {
-			inside = !inside
-		}
-	}
-	return inside
-}
-
-func findNearestStreet(lat, lng float64) StreetInfo {
-	var nearest StreetInfo
-	minDistance := math.MaxFloat64
-	origin := Point{Lat: lat, Lng: lng}
-
-	for _, s := range allStreets {
-		for _, pt := range s.Points {
-			d := calculateDistance(origin, Point{Lat: pt.Lat, Lng: pt.Lng})
-			if d < minDistance {
-				minDistance = d
-				var polylines []Point
-				for _, p := range s.Polylines {
-					polylines = append(polylines, Point{Lat: p.Lat, Lng: p.Lng})
-				}
-				nearest = StreetInfo{
-					StreetName: s.StreetName,
-					Polylines:  polylines,
-				}
-			}
-		}
-	}
-	return nearest
-}
-
-func findStreet(lat, lng float64) StreetInfo {
-	for _, s := range allStreets {
-		if pointInPolygon(lat, lng, s.Points) {
-			var resultPolylines []Point
-			for _, p := range s.Polylines {
-				resultPolylines = append(resultPolylines, Point{Lat: p.Lat, Lng: p.Lng})
-			}
-			return StreetInfo{
-				StreetName: s.StreetName,
-				Polylines:  resultPolylines,
-			}
-		}
-	}
-	return findNearestStreet(lat, lng)
-}
-
-func LocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Error upgrading to websocket: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	var lastLocation Point
-	var lastResponse LocationResponse
-	firstRun := true
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		var activePoints []Point
-		if locationData.Latitude != 0.0 || locationData.Longitude != 0.0 {
-			activePoints = append(activePoints, Point{Lat: locationData.Latitude, Lng: locationData.Longitude})
-		}
-		if simulateCarsActive {
-			activePoints = append(activePoints, simulatedCarPoints...)
-		}
-
-		occupancy := make(map[int]int)
-		for _, p := range activePoints {
-			s := findStreet(p.Lat, p.Lng)
-			sID := findStreetID(s.StreetName)
-			occupancy[sID]++
-		}
-
-		var responses []LocationResponse
-		for _, p := range activePoints {
-			if p.Lat == 0.0 && p.Lng == 0.0 {
-				response := LocationResponse{
-					Location: struct {
-						Latitude  float64 `json:"latitude"`
-						Longitude float64 `json:"longitude"`
-					}{
-						Latitude:  0.0,
-						Longitude: 0.0,
-					},
-					StreetInfo: StreetInfo{
-						StreetName: "",
-						Polylines:  []Point{},
-					},
-					Message: "without signal",
-				}
-				responses = append(responses, response)
-				continue
-			}
-
-			if !firstRun && arePointsWithinMargin(p, lastLocation) {
-				lastResponse.Message = "Using cached location"
-				responses = append(responses, lastResponse)
-				continue
-			} else {
-				log.Printf("New location update - Latitude: %f, Longitude: %f", p.Lat, p.Lng)
-				streetInfo := findStreet(p.Lat, p.Lng)
-				sID := findStreetID(streetInfo.StreetName)
-				capacity := getStreetCapacity(streetInfo.StreetName)
-				occupied := occupancy[sID]
-				percentage := 0
-				if capacity > 0 {
-					percentage = (occupied * 100) / capacity
-				}
-
-				response := LocationResponse{
-					Location: struct {
-						Latitude  float64 `json:"latitude"`
-						Longitude float64 `json:"longitude"`
-					}{
-						Latitude:  p.Lat,
-						Longitude: p.Lng,
-					},
-					StreetInfo:         streetInfo,
-					Message:            "New location detected",
-					PercentageOccupied: percentage,
-				}
-				lastLocation = p
-				lastResponse = response
-				firstRun = false
-
-				responses = append(responses, response)
-			}
-		}
-
-		if len(responses) > 0 {
-			if err := conn.WriteJSON(responses); err != nil {
-				log.Printf("Error writing JSON array to websocket: %v", err)
-				return
-			}
-		}
-	}
-}
-
-func TestLocationWebSocketHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("Error upgrading to websocket: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	var lastLocation Point
-	var lastResponse LocationResponse
-	firstRun := true
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		if !testInProgress {
-			log.Printf("Test run completed. Stopping WebSocket updates.")
-			break
-		}
-
-		var activePoints []Point
-		if testLocation.Latitude != 0.0 || testLocation.Longitude != 0.0 {
-			activePoints = append(activePoints, Point{Lat: testLocation.Latitude, Lng: testLocation.Longitude})
-		}
-		if simulateCarsActive {
-			activePoints = append(activePoints, simulatedCarPoints...)
-		}
-
-		occupancy := make(map[int]int)
-		for _, p := range activePoints {
-			s := findStreet(p.Lat, p.Lng)
-			sID := findStreetID(s.StreetName)
-			occupancy[sID]++
-		}
-
-		var responses []LocationResponse
-		for _, p := range activePoints {
-			if p.Lat == 0.0 && p.Lng == 0.0 {
-				response := LocationResponse{
-					Location: struct {
-						Latitude  float64 `json:"latitude"`
-						Longitude float64 `json:"longitude"`
-					}{
-						Latitude:  0.0,
-						Longitude: 0.0,
-					},
-					StreetInfo: StreetInfo{
-						StreetName: "",
-						Polylines:  []Point{},
-					},
-					Message: "without signal",
-				}
-				responses = append(responses, response)
-				continue
-			}
-
-			if !firstRun && arePointsWithinMargin(p, lastLocation) {
-				lastResponse.Message = "Using cached location"
-				responses = append(responses, lastResponse)
-				continue
-			} else {
-				log.Printf("New test location update - Latitude: %f, Longitude: %f", p.Lat, p.Lng)
-				streetInfo := findStreet(p.Lat, p.Lng)
-				sID := findStreetID(streetInfo.StreetName)
-				capacity := getStreetCapacity(streetInfo.StreetName)
-				occupied := occupancy[sID]
-				percentage := 0
-				if capacity > 0 {
-					percentage = (occupied * 100) / capacity
-				}
-
-				response := LocationResponse{
-					Location: struct {
-						Latitude  float64 `json:"latitude"`
-						Longitude float64 `json:"longitude"`
-					}{
-						Latitude:  p.Lat,
-						Longitude: p.Lng,
-					},
-					StreetInfo:         streetInfo,
-					Message:            "New location detected",
-					PercentageOccupied: percentage,
-				}
-				lastLocation = p
-				lastResponse = response
-				firstRun = false
-
-				responses = append(responses, response)
-			}
-		}
-
-		if len(responses) > 0 {
-			if err := conn.WriteJSON(responses); err != nil {
-				log.Printf("Error writing JSON to websocket: %v", err)
-				return
-			}
-		}
-	}
-}
-
-func RunTestLocationsHandler(w http.ResponseWriter, r *http.Request) {
-	if testInProgress {
-		w.Write([]byte("Test already in progress"))
-		return
-	}
-	testInProgress = true
-
-	go func() {
-		points := []Point{
-			{Lat: 45.5834154, Lng: -73.5331976},
-			{Lat: 45.5836587, Lng: -73.5330197},
-			{Lat: 45.5839076, Lng: -73.5328529},
-			{Lat: 45.5841270, Lng: -73.5334444},
-			{Lat: 45.5844604, Lng: -73.5344887},
-			{Lat: 45.5847659, Lng: -73.5353965},
-			{Lat: 45.5850823, Lng: -73.5363582},
-			{Lat: 45.5858864, Lng: -73.5362865},
-			{Lat: 45.5855239, Lng: -73.5351299},
-			{Lat: 45.5850867, Lng: -73.5338104},
-			{Lat: 45.5847081, Lng: -73.5326593},
-			{Lat: 45.5846233, Lng: -73.5323988},
-			{Lat: 45.5848715, Lng: -73.5322361},
-			{Lat: 45.5850948, Lng: -73.5320983},
-			{Lat: 0.0, Lng: 0.0},
-			{Lat: 0.0, Lng: 0.0},
-			{Lat: 0.0, Lng: 0.0},
-		}
-		for _, p := range points {
-			testLocation.Latitude = p.Lat
-			testLocation.Longitude = p.Lng
-			time.Sleep(5 * time.Second)
-		}
-		testInProgress = false
-	}()
-
-	w.Write([]byte("Test started"))
-}
-
-func SimulateCarsHandler(w http.ResponseWriter, r *http.Request) {
-	if simulateCarsActive {
-		simulateCarsActive = false
-		w.Write([]byte("Simulation stopped"))
-	} else {
-		simulateCarsActive = true
-		w.Write([]byte("Simulation started"))
-	}
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -507,42 +74,260 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Helper function to check if two points are within 50cm of each other
-func arePointsWithinMargin(p1, p2 Point) bool {
-	distance := calculateDistance(p1, p2)
-	return distance <= 0.5
-}
+func GetAllStreetsHandler(w http.ResponseWriter, r *http.Request) {
+	allStreetsMutex.RLock()
+	defer allStreetsMutex.RUnlock()
 
-func calculateDistance(p1, p2 Point) float64 {
-	const R = 6371000
-
-	lat1 := p1.Lat * math.Pi / 180
-	lat2 := p2.Lat * math.Pi / 180
-	deltaLat := (p2.Lat - p1.Lat) * math.Pi / 180
-	deltaLng := (p2.Lng - p1.Lng) * math.Pi / 180
-
-	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +
-		math.Cos(lat1)*math.Cos(lat2)*
-			math.Sin(deltaLng/2)*math.Sin(deltaLng/2)
-
-	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
-	return R * c
-}
-
-func findStreetID(streetName string) int {
-	for i, s := range allStreets {
-		if s.StreetName == streetName {
-			return i
+	resp := make([]StreetResponse, len(allStreets))
+	for i, st := range allStreets {
+		resp[i] = StreetResponse{
+			StreetName:        st.StreetName,
+			Polylines:         st.Polylines,
+			Occupancy:         st.Occupancy,
+			Capacity:          st.Capacity,
+			AvailableCapacity: st.Capacity - st.Occupancy,
 		}
 	}
-	return -1
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	const chunkSize = 500
+	w.Write([]byte("["))
+	for i := 0; i < len(resp); i += chunkSize {
+		end := i + chunkSize
+		if end > len(resp) {
+			end = len(resp)
+		}
+		chunk := resp[i:end]
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			log.Printf("Error marshalling street chunk: %v", err)
+			break
+		}
+		w.Write(data)
+		if end < len(resp) {
+			w.Write([]byte(","))
+		}
+		flusher.Flush()
+	}
+	w.Write([]byte("]"))
 }
 
-func getStreetCapacity(streetName string) int {
-	for _, s := range allStreets {
-		if s.StreetName == streetName {
-			return s.ParkingCapacity
+func AllStreetsWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("Error upgrading to websocket for all streets: %v", err)
+		return
+	}
+
+	clientsMutex.Lock()
+	clients[conn] = true
+	log.Printf("Client connected to /ws/all-streets: %s. Total clients: %d", conn.RemoteAddr(), len(clients))
+	clientsMutex.Unlock()
+
+	pingTicker := time.NewTicker(pingPeriod)
+
+	defer func() {
+		pingTicker.Stop()
+		clientsMutex.Lock()
+		if _, ok := clients[conn]; ok {
+			delete(clients, conn)
+			log.Printf("Handler cleanup: Removed client %s. Total clients: %d", conn.RemoteAddr(), len(clients))
+		} else {
+			log.Printf("Handler cleanup: Client %s already removed. Total clients: %d", conn.RemoteAddr(), len(clients))
+		}
+		clientsMutex.Unlock()
+		conn.Close()
+		log.Printf("Handler cleanup complete for %s", conn.RemoteAddr()) // Add a final confirmation log
+	}()
+
+	conn.SetReadLimit(maxMessageSize)
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	go func() {
+		defer func() {
+			log.Printf("Ping goroutine for %s exiting.", conn.RemoteAddr())
+		}()
+		for range pingTicker.C {
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Error sending ping to %s: %v", conn.RemoteAddr(), err)
+				return
+			}
+		}
+	}()
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			// error/disconnect before breaking
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				log.Printf("Handler exit: Unexpected close error for client %s: %v", conn.RemoteAddr(), err)
+			} else if e, ok := err.(*websocket.CloseError); ok && e.Code == websocket.CloseNormalClosure {
+
+				log.Printf("Handler exit: Client %s closed connection normally.", conn.RemoteAddr())
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+
+				log.Printf("Handler exit: Read deadline exceeded (pong timeout) for client %s: %v", conn.RemoteAddr(), err)
+			} else {
+
+				log.Printf("Handler exit: Client %s connection error: %v", conn.RemoteAddr(), err)
+			}
+			break
 		}
 	}
-	return 0
+
+	log.Printf("Handler read loop exited for %s", conn.RemoteAddr())
+}
+
+func broadcastOccupancyUpdates() {
+	ticker := time.NewTicker(20 * time.Second) // Keep the ticker interval
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var disconnectedClients []*websocket.Conn // Collect disconnected clients across all sends in this tick
+
+		allStreetsMutex.Lock() // Use write lock as we might update LastOccupancy
+		for i := range allStreets {
+			if allStreets[i].Occupancy != allStreets[i].LastOccupancy {
+				// Occupancy changed for this street
+				allStreets[i].LastOccupancy = allStreets[i].Occupancy // Update LastOccupancy
+
+				// Create response for this specific street
+				st := allStreets[i] // Create a copy for safety within the loop iteration
+				update := StreetResponse{
+					StreetName:        st.StreetName,
+					Polylines:         st.Polylines,
+					Occupancy:         st.Occupancy,
+					Capacity:          st.Capacity,
+					AvailableCapacity: st.Capacity - st.Occupancy,
+				}
+
+				// Marshal the individual update
+				message, err := json.Marshal(update)
+				if err != nil {
+					log.Printf("Error marshalling single street update (%s): %v", st.StreetName, err)
+					continue // Skip broadcasting this update if marshalling fails
+				}
+
+				// Broadcast this specific update to all clients
+				log.Printf("Broadcasting update for street %s to %d clients.", st.StreetName, len(clients))
+				clientsMutex.RLock() // Use read lock for broadcasting
+				var disconnectedThisSend []*websocket.Conn
+				for client := range clients {
+					client.SetWriteDeadline(time.Now().Add(writeWait))
+					if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
+						log.Printf("Error writing update for street %s to %s: %v", st.StreetName, client.RemoteAddr(), err)
+						// Don't remove immediately, collect and remove outside the RLock
+						disconnectedThisSend = append(disconnectedThisSend, client)
+					}
+				}
+				clientsMutex.RUnlock()
+
+				// Add clients that failed this specific send to the overall list for this tick
+				// Assign the result of append back to disconnectedClients
+				disconnectedClients = append(disconnectedClients, disconnectedThisSend...)
+			}
+		}
+		allStreetsMutex.Unlock() // Release lock after checking all streets
+
+		// Clean up disconnected clients after iterating through all streets and attempting sends
+		if len(disconnectedClients) > 0 {
+			clientsMutex.Lock()                                  // Use write lock for removal
+			uniqueDisconnected := make(map[*websocket.Conn]bool) // Ensure we only process each disconnected client once per tick
+			for _, c := range disconnectedClients {
+				if !uniqueDisconnected[c] {
+					if _, ok := clients[c]; ok { // Check if client wasn't already removed
+						delete(clients, c)
+						c.Close() // Close the connection
+						log.Printf("Removed client %s due to write error during broadcast. Total clients: %d", c.RemoteAddr(), len(clients))
+					}
+					uniqueDisconnected[c] = true
+				}
+			}
+			clientsMutex.Unlock()
+		}
+	}
+}
+
+// SimulateCarsHandler handles the test endpoint to simulate car presence and disappearance.
+func SimulateCarsHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Received request to simulate cars.")
+
+	testLocations := []Point{
+		{Lat: 45.582959, Lng: -73.532044},
+		{Lat: 45.584344, Lng: -73.531706},
+		{Lat: 45.585149, Lng: -73.536469},
+		{Lat: 45.586456, Lng: -73.535766},
+		{Lat: 45.583817, Lng: -73.533524},
+	}
+
+	// Keep track of the IDs used in this simulation run
+	simulationCarIDs := []string{}
+
+	// --- Start Simulation ---
+	carLocationsMutex.Lock()
+	// Don't clear existing locations. Add/overwrite simulated cars.
+	// carLocations = make(map[string]Point)
+	// log.Printf("Cleared existing car locations for simulation.") // Log message no longer accurate
+
+	// Add test locations
+	for i, loc := range testLocations {
+		carID := fmt.Sprintf("sim-%d", i+1)
+		carLocations[carID] = loc
+		// Collect the IDs we are adding/modifying
+		simulationCarIDs = append(simulationCarIDs, carID)
+		log.Printf("Added/Updated simulated car %s at Lat: %f, Lng: %f", carID, loc.Lat, loc.Lng)
+	}
+
+	// Create a copy for recalculation (includes real cars + simulated cars)
+	currentLocationsCopy := make(map[string]Point, len(carLocations))
+	for k, v := range carLocations {
+		currentLocationsCopy[k] = v
+	}
+	carLocationsMutex.Unlock()
+
+	// Recalculate occupancy with simulated cars added
+	log.Println("Recalculating occupancy for simulated cars...")
+	go recalculateStreetOccupancy(currentLocationsCopy) // Run in goroutine to avoid blocking response
+
+	// Respond to the client immediately
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Car simulation started. Simulated cars will disappear in 1 minute."))
+	log.Println("Simulation started. Scheduling disappearance in 1 minute.")
+
+	// --- Schedule End Simulation ---
+	// Use the simulationCarIDs captured at the start of this specific request
+	time.AfterFunc(1*time.Minute, func() {
+		log.Println("1 minute passed. Simulating car disappearance...")
+		carLocationsMutex.Lock()
+
+		// Remove only the specific simulation cars added by this run
+		// carLocations = make(map[string]Point) // Don't clear all
+		log.Printf("Removing %d simulated car locations.", len(simulationCarIDs))
+		for _, id := range simulationCarIDs {
+			delete(carLocations, id)
+			log.Printf("Removed simulated car %s", id)
+		}
+
+		// Create a copy (now with only real cars or cars from other simulations) for recalculation
+		currentLocationsCopyAfter := make(map[string]Point, len(carLocations))
+		for k, v := range carLocations {
+			currentLocationsCopyAfter[k] = v
+		}
+		carLocationsMutex.Unlock()
+
+		// Recalculate occupancy (should reset occupancy caused by these simulated cars)
+		log.Println("Recalculating occupancy after simulated car disappearance...")
+		recalculateStreetOccupancy(currentLocationsCopyAfter)
+		log.Println("Simulation ended.")
+	})
 }

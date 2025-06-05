@@ -55,7 +55,8 @@ func setupMQTT() {
 
 		log.Printf("New location received for car %s - Latitude: %f, Longitude: %f", carID, newLocation.Lat, newLocation.Lng)
 
-		go recalculateStreetOccupancy(currentLocationsCopy)
+		affectedIDs := recalculateStreetOccupancy(currentLocationsCopy)
+		broadcastStreetIDUpdates(affectedIDs)
 	})
 
 	client := mqtt.NewClient(opts)

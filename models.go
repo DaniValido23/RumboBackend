@@ -39,6 +39,7 @@ type Point struct {
 }
 
 type StreetInfo struct {
+	ID_TRC     int     `json:"id_trc"`
 	StreetName string  `json:"streetName"`
 	Polylines  []Point `json:"polylines"`
 }
@@ -52,10 +53,9 @@ type StreetData struct {
 	Polylines     []Point `json:"polylines"`
 }
 
-type StreetResponse struct {
-	StreetName        string  `json:"streetName"`
-	Polylines         []Point `json:"polylines"`
-	Occupancy         int     `json:"occupancy"`
-	Capacity          int     `json:"capacity"`
-	AvailableCapacity int     `json:"availableCapacity"`
+type StreetUpdateMessage struct {
+	ODONYME    string `json:"ODONYME"`
+	ID_TRC     int    `json:"ID_TRC"`
+	CarsNumber int    `json:"CarsNumber"`
+	HexColor   string `json:"HexColor"`
 }

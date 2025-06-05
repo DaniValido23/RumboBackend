@@ -39,9 +39,8 @@ func loadStreetData() {
 	defer allStreetsMutex.Unlock()
 
 	allStreets = []StreetData{}
-	// Initialize R-tree: 2 dims, min children=25
 	streetIndex = rtreego.NewTree(2, 25, 50)
-	for i, feature := range geojsonCollection.Features {
+	for _, feature := range geojsonCollection.Features {
 		if feature.Geometry.Type == "LineString" {
 			var polylines []Point
 			for _, coord := range feature.Geometry.Coordinates {
@@ -51,7 +50,7 @@ func loadStreetData() {
 			}
 
 			street := StreetData{
-				ID:            i,
+				ID:            feature.Properties.ID_TRC,
 				StreetName:    strings.TrimSpace(feature.Properties.ODONYME),
 				Polylines:     polylines,
 				Occupancy:     0,
@@ -82,9 +81,10 @@ func loadStreetData() {
 	log.Printf("Loaded %d streets from geobase.json", len(allStreets))
 }
 
-func recalculateStreetOccupancy(currentLocations map[string]Point) {
+func recalculateStreetOccupancy(currentLocations map[string]Point) []int {
 	log.Printf("Recalculating street occupancy for %d cars...", len(currentLocations))
 	newOccupancy := make(map[int]int)
+	affectedStreetIDs := make(map[int]bool)
 
 	allStreetsMutex.RLock()
 	streetsSnapshot := make([]StreetData, len(allStreets))
@@ -93,33 +93,43 @@ func recalculateStreetOccupancy(currentLocations map[string]Point) {
 
 	for _, location := range currentLocations {
 		if location.Lat == 0.0 && location.Lng == 0.0 {
+			continue
 		}
 		nearestStreetInfo := findNearestStreetInSnapshot(location.Lat, location.Lng, streetsSnapshot)
 		if nearestStreetInfo.StreetName != "" {
-			sID := findStreetIDInSnapshot(nearestStreetInfo.StreetName, streetsSnapshot)
-			if sID != -1 {
-				newOccupancy[sID]++
+			if nearestStreetInfo.ID_TRC != 0 {
+				newOccupancy[nearestStreetInfo.ID_TRC]++
+				affectedStreetIDs[nearestStreetInfo.ID_TRC] = true
 			}
 		}
 	}
 
 	allStreetsMutex.Lock()
 	for i := range allStreets {
-		allStreets[i].Occupancy = newOccupancy[allStreets[i].ID]
+		oldOccupancy := allStreets[i].Occupancy
+		streetID := allStreets[i].ID
+		allStreets[i].Occupancy = newOccupancy[streetID]
+		if oldOccupancy != allStreets[i].Occupancy {
+			affectedStreetIDs[streetID] = true
+		}
 	}
 	allStreetsMutex.Unlock()
 
 	log.Println("Street occupancy recalculated.")
+
+	var ids []int
+	for id := range affectedStreetIDs {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
-// R-tree to find nearest street
 func findNearestStreetInSnapshot(lat, lng float64, _ []StreetData) StreetInfo {
 	if streetIndex == nil {
 		log.Printf("Spatial index not initialized, fallback to brute force")
 		return StreetInfo{}
 	}
 	originPt := rtreego.Point{lat, lng}
-	// Search few nearest street envelopes
 	const k = 5
 	results := streetIndex.NearestNeighbors(k, originPt)
 	if len(results) == 0 {
@@ -135,21 +145,14 @@ func findNearestStreetInSnapshot(lat, lng float64, _ []StreetData) StreetInfo {
 			d := calculateDistance(origin, pt)
 			if d < minDist {
 				minDist = d
-				nearest = StreetInfo{StreetName: is.sd.StreetName, Polylines: is.sd.Polylines}
+				nearest = StreetInfo{
+					ID_TRC:     is.sd.ID,
+					StreetName: is.sd.StreetName,
+					Polylines:  is.sd.Polylines}
 			}
 		}
 	}
 	return nearest
-}
-
-func findStreetIDInSnapshot(streetName string, streets []StreetData) int {
-	for _, s := range streets {
-		if s.StreetName == streetName {
-			return s.ID
-		}
-	}
-
-	return -1
 }
 
 func calculateDistance(p1, p2 Point) float64 {
@@ -167,6 +170,27 @@ func calculateDistance(p1, p2 Point) float64 {
 
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
-	distance := R * c // Distance in meters
+	distance := R * c
 	return distance
+}
+
+func calculateColorFromOccupancy(occupancy int) string {
+	if occupancy > 5 {
+		occupancy = 5
+	}
+
+	percentage := float64(occupancy) / 5.0 * 100.0
+
+	switch {
+	case percentage == 0:
+		return "#00FF00"
+	case percentage <= 25:
+		return "#7FFF00"
+	case percentage <= 50:
+		return "#FFFF00"
+	case percentage <= 75:
+		return "#FF7F00"
+	default:
+		return "#FF0000"
+	}
 }

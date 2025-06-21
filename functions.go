@@ -160,8 +160,8 @@ func calculateDistance(p1, p2 Point) float64 {
 	lat1Rad := p1.Lat * math.Pi / 180
 	lat2Rad := p2.Lat * math.Pi / 180
 
-	deltaLat := lat2Rad - lat1Rad
-	deltaLng := p2.Lng - p1.Lng
+	deltaLat := lat2Rad - lat1Rad/180
+	deltaLng := p2.Lng - p1.Lng/180
 
 	// Haversine formula
 	a := math.Sin(deltaLat/2)*math.Sin(deltaLat/2) +

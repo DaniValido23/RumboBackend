@@ -4,3 +4,6 @@
 # Other common ignores
 *.log
 *.tmp
+
+diagram/
+geobase.json

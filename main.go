@@ -39,10 +39,10 @@ func main() {
 	setupMQTT()
 
 	r := mux.NewRouter()
-
 	r.HandleFunc("/", HomeHandler).Methods("GET")
 	r.HandleFunc("/ws/all-streets", AllStreetsWebSocketHandler)
 	r.HandleFunc("/api/test/simulate-cars-100", SimulateCarsGroupHandler(100)).Methods("GET")
+	r.HandleFunc("/api/test/simulate-cars-223", SimulateCarsGroupHandler(223)).Methods("GET")
 	r.HandleFunc("/api/test/simulate-cars-300", SimulateCarsGroupHandler(300)).Methods("GET")
 	r.HandleFunc("/api/test/simulate-cars-500", SimulateCarsGroupHandler(500)).Methods("GET")
 	r.Use(loggingMiddleware)
@@ -266,6 +266,8 @@ func loadRandomGroupIDs(groupSize int) ([]int, error) {
 	switch groupSize {
 	case 100:
 		key = "group_100"
+	case 223:
+		key = "group_223"
 	case 300:
 		key = "group_300"
 	case 500:

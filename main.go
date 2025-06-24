@@ -41,10 +41,9 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/", HomeHandler).Methods("GET")
 	r.HandleFunc("/ws/all-streets", AllStreetsWebSocketHandler)
-	r.HandleFunc("/api/test/simulate-cars-100", SimulateCarsGroupHandler(100)).Methods("GET")
-	r.HandleFunc("/api/test/simulate-cars-223", SimulateCarsGroupHandler(223)).Methods("GET")
-	r.HandleFunc("/api/test/simulate-cars-300", SimulateCarsGroupHandler(300)).Methods("GET")
-	r.HandleFunc("/api/test/simulate-cars-500", SimulateCarsGroupHandler(500)).Methods("GET")
+	r.HandleFunc("/api/test/simulate-houseGroup", SimulateCarsGroupHandler("houseGroup")).Methods("GET")
+	r.HandleFunc("/api/test/simulate-montrealGroup", SimulateCarsGroupHandler("montrealGroup")).Methods("GET")
+	r.HandleFunc("/api/test/simulation-status", SimulationStatusHandler).Methods("GET")
 	r.Use(loggingMiddleware)
 
 	handler := handlers.CORS(
@@ -62,7 +61,31 @@ func main() {
 }
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("¡Bienvenido a la API!"))
+	w.Write([]byte("Welcome to the Traffic Simulation API!"))
+}
+
+func SimulationStatusHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	simulationMutex.RLock()
+	running := simulationRunning
+	simType := currentSimulationType
+	simulationMutex.RUnlock()
+
+	var response SimulateResponse
+	if running {
+		response = SimulateResponse{
+			Message: fmt.Sprintf("Simulation %s running", simType),
+			Status:  "on",
+		}
+	} else {
+		response = SimulateResponse{
+			Message: "simulation stopped",
+			Status:  "off",
+		}
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {
@@ -189,13 +212,37 @@ func broadcastStreetIDUpdates(affectedIDs []int) {
 	}
 }
 
-func SimulateCarsGroupHandler(groupSize int) http.HandlerFunc {
+func SimulateCarsGroupHandler(groupName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		groupIDs, err := loadRandomGroupIDs(groupSize)
-		if err != nil {
-			http.Error(w, "Error loading group IDs", http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+
+		simulationMutex.Lock()
+		defer simulationMutex.Unlock()
+
+		// If simulation is already running, stop it
+		if simulationRunning {
+			stoppedGroup := currentSimulationType
+			stopSimulation()
+			response := SimulateResponse{
+				Message: fmt.Sprintf("Simulation %s stopped", stoppedGroup),
+				Status:  "off",
+			}
+			json.NewEncoder(w).Encode(response)
 			return
 		}
+
+		// Start new simulation
+		groupIDs, err := loadRandomGroupIDs(groupName)
+		if err != nil {
+			response := SimulateResponse{
+				Message: fmt.Sprintf("Error loading IDs from group %s", groupName),
+				Status:  "off",
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+
 		allStreetsMutex.RLock()
 		var testLocations []Point
 		for _, id := range groupIDs {
@@ -207,16 +254,30 @@ func SimulateCarsGroupHandler(groupSize int) http.HandlerFunc {
 			}
 		}
 		allStreetsMutex.RUnlock()
+
 		if len(testLocations) == 0 {
-			http.Error(w, "No test locations found for group", http.StatusInternalServerError)
+			response := SimulateResponse{
+				Message: fmt.Sprintf("Not found %s", groupName),
+				Status:  "off",
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(response)
 			return
 		}
-		simulateCarsWithLocations(w, testLocations)
+
+		startSimulation(testLocations, groupName)
+		response := SimulateResponse{
+			Message: fmt.Sprintf("Simulation %s running with %d cars", groupName, len(testLocations)),
+			Status:  "on",
+		}
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
-func simulateCarsWithLocations(w http.ResponseWriter, testLocations []Point) {
-	simulationCarIDs := []string{}
+func startSimulation(testLocations []Point, groupName string) {
+	simulationRunning = true
+	currentSimulationType = groupName
+	simulationCarIDs = []string{}
 
 	carLocationsMutex.Lock()
 	for i, loc := range testLocations {
@@ -233,27 +294,36 @@ func simulateCarsWithLocations(w http.ResponseWriter, testLocations []Point) {
 	affectedIDs := recalculateStreetOccupancy(currentLocationsCopy)
 	broadcastStreetIDUpdates(affectedIDs)
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(fmt.Sprintf("Car simulation started for %d cars. Simulated cars will disappear in 3 minutes.", len(testLocations))))
-	log.Printf("Simulation started for %d cars. Scheduling disappearance in 3 minutes.", len(testLocations))
-
-	time.AfterFunc(3*time.Minute, func() {
-		carLocationsMutex.Lock()
-		for _, id := range simulationCarIDs {
-			delete(carLocations, id)
-		}
-		currentLocationsCopyAfter := make(map[string]Point, len(carLocations))
-		for k, v := range carLocations {
-			currentLocationsCopyAfter[k] = v
-		}
-		carLocationsMutex.Unlock()
-		affectedIDs := recalculateStreetOccupancy(currentLocationsCopyAfter)
-		broadcastStreetIDUpdates(affectedIDs)
-		log.Println("Simulation ended.")
-	})
+	log.Printf("Simulation %s started for %d cars.", groupName, len(testLocations))
 }
 
-func loadRandomGroupIDs(groupSize int) ([]int, error) {
+func stopSimulation() {
+	if simulationRunning {
+		stopSimulationInternal()
+	}
+}
+
+func stopSimulationInternal() {
+	simulationRunning = false
+	currentSimulationType = ""
+
+	carLocationsMutex.Lock()
+	for _, id := range simulationCarIDs {
+		delete(carLocations, id)
+	}
+	currentLocationsCopy := make(map[string]Point, len(carLocations))
+	for k, v := range carLocations {
+		currentLocationsCopy[k] = v
+	}
+	carLocationsMutex.Unlock()
+
+	affectedIDs := recalculateStreetOccupancy(currentLocationsCopy)
+	broadcastStreetIDUpdates(affectedIDs)
+	simulationCarIDs = []string{}
+	log.Println("Simulation ended.")
+}
+
+func loadRandomGroupIDs(groupName string) ([]int, error) {
 	data, err := ioutil.ReadFile("random_id_groups.json")
 	if err != nil {
 		return nil, err
@@ -262,18 +332,5 @@ func loadRandomGroupIDs(groupSize int) ([]int, error) {
 	if err := json.Unmarshal(data, &groups); err != nil {
 		return nil, err
 	}
-	var key string
-	switch groupSize {
-	case 100:
-		key = "group_100"
-	case 223:
-		key = "group_223"
-	case 300:
-		key = "group_300"
-	case 500:
-		key = "group_500"
-	default:
-		return nil, fmt.Errorf("unsupported group size")
-	}
-	return groups[key], nil
+	return groups[groupName], nil
 }

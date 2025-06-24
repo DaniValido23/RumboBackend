@@ -8,6 +8,11 @@ var carLocationsMutex sync.RWMutex
 var allStreets []StreetData
 var allStreetsMutex sync.RWMutex
 
+var simulationRunning = false
+var simulationMutex sync.RWMutex
+var simulationCarIDs []string
+var currentSimulationType string
+
 type GeoJSONGeometry struct {
 	Type        string      `json:"type"`
 	Coordinates [][]float64 `json:"coordinates"`
@@ -58,4 +63,10 @@ type StreetUpdateMessage struct {
 	ID_TRC     int    `json:"ID_TRC"`
 	CarsNumber int    `json:"CarsNumber"`
 	HexColor   string `json:"HexColor"`
+}
+
+// SimulateResponse represents the response for simulation APIs
+type SimulateResponse struct {
+	Message string `json:"Message"`
+	Status  string `json:"Status"`
 }

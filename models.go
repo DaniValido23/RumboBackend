@@ -65,7 +65,6 @@ type StreetUpdateMessage struct {
 	HexColor   string `json:"HexColor"`
 }
 
-// SimulateResponse represents the response for simulation APIs
 type SimulateResponse struct {
 	Message string `json:"Message"`
 	Status  string `json:"Status"`

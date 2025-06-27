@@ -3,17 +3,35 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"os"
 	"strings"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 func setupMQTT() {
+	broker := os.Getenv("MQTT_BROKER")
+	if broker == "" {
+		log.Fatal("MQTT_BROKER environment variable not set")
+	}
+	username := os.Getenv("MQTT_USERNAME")
+	if username == "" {
+		log.Fatal("MQTT_USERNAME environment variable not set")
+	}
+	password := os.Getenv("MQTT_PASSWORD")
+	if password == "" {
+		log.Fatal("MQTT_PASSWORD environment variable not set")
+	}
+	topic := os.Getenv("MQTT_TOPIC")
+	if topic == "" {
+		log.Fatal("MQTT_TOPIC environment variable not set")
+	}
+
 	opts := mqtt.NewClientOptions()
-	opts.AddBroker("tcp://eu1.cloud.thethings.industries:1883")
+	opts.AddBroker(broker)
 	opts.SetClientID("go_mqtt_client")
-	opts.SetUsername("gps-3a@parallel")
-	opts.SetPassword("NNSXS.UYPEF3S77QZ7WFOPUTE3QWTFNBDIS7LPTRLJLPA.ZYIZOEME4WTRWUI6KV6VCFJIHBXO5TYXD6JFZS2V4GCCU27FQOQQ")
+	opts.SetUsername(username)
+	opts.SetPassword(password)
 
 	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
 		log.Printf("Received message from topic: %s\n", msg.Topic())
@@ -64,7 +82,6 @@ func setupMQTT() {
 		log.Fatalf("Error connecting to MQTT broker: %v", token.Error())
 	}
 
-	topic := "v3/gps-3a@parallel/devices/+/location/solved"
 	if token := client.Subscribe(topic, 0, nil); token.Wait() && token.Error() != nil {
 		log.Fatalf("Error subscribing to topic %s: %v", topic, token.Error())
 	}
